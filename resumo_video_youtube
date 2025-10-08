@@ -1,59 +1,107 @@
-import os
-from pytube import YouTube
-import whisper
-from googleapiclient.discovery import build
-import google.generativeai as genai
-from twilio.rest import Client
+# 📦 Primeiro, instalei as bibliotecas necessárias com o comando abaixo no terminal:
+# pip install pytube openai-whisper google-api-python-client google-generativeai twilio
 
-YOUTUBE_API_KEY = "SUA_CHAVE_YOUTUBE"
-GOOGLE_API_KEY = "SUA_CHAVE_GEMINI"
-TWILIO_ACCOUNT_SID = "SEU_SID_TWILIO"
-TWILIO_AUTH_TOKEN = "SEU_TOKEN_TWILIO"
-CHANNEL_ID = "UCT6Imb3GXhF8GmjpIk6y2lg"
+# 💡 Importei as bibliotecas que vou usar
+import os  # para lidar com pastas e arquivos
+from pytube import YouTube  # para baixar o áudio do vídeo do YouTube
+import whisper  # para transcrever o áudio em texto
+from googleapiclient.discovery import build  # para conectar com a API do YouTube
+import google.generativeai as genai  # para usar o modelo Gemini do Google e gerar o resumo
+from twilio.rest import Client  # para enviar mensagem no WhatsApp
 
+# 🔑 Aqui coloco minhas chaves das APIs e o ID do canal
+YOUTUBE_API_KEY = "SUA_CHAVE_YOUTUBE"       # chave da API do YouTube
+GOOGLE_API_KEY = "SUA_CHAVE_GEMINI"         # chave da API do Google Gemini
+TWILIO_ACCOUNT_SID = "SEU_SID_TWILIO"       # SID da conta Twilio
+TWILIO_AUTH_TOKEN = "SEU_TOKEN_TWILIO"      # Token da Twilio
+CHANNEL_ID = "UCT6Imb3GXhF8GmjpIk6y2lg"     # ID do canal no YouTube que quero monitorar
+
+# ⚙️ Configuro o Gemini com minha chave
 genai.configure(api_key=GOOGLE_API_KEY)
-youtube_client = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-GEMINI_TEXT_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite-preview-09-2025')
-model_whisper = whisper.load_model("small")
 
+# 🧠 Crio os clientes das APIs que vou usar
+youtube_client = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)  # conecta com a API do YouTube
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)          # conecta com a Twilio
+GEMINI_TEXT_MODEL = genai.GenerativeModel('gemini-1.5-flash')          # define o modelo do Gemini
+model_whisper = whisper.load_model("small")                            # carrega o modelo pequeno do Whisper (mais rápido)
+
+# 📁 Crio as pastas onde vou salvar os áudios e os dados, caso ainda não existam
 os.makedirs("audios", exist_ok=True)
 os.makedirs("dados", exist_ok=True)
+
+# 📄 Arquivo onde salvo o ID do último vídeo processado (para não repetir)
 ULTIMO_ID_FILE = 'dados/ultimo_video_id.txt'
 
+
+# 🎥 Função para buscar novos vídeos do canal
 def buscar_videos_novos():
+    # Lê o último vídeo salvo (caso exista)
     ultimo = open(ULTIMO_ID_FILE).read().strip() if os.path.exists(ULTIMO_ID_FILE) else None
+
+    # Busca a playlist de uploads do canal
     uploads = youtube_client.channels().list(part='contentDetails', id=CHANNEL_ID).execute()
     playlist = uploads['items'][0]['contentDetails']['relatedPlaylists']['uploads']
-    videos = youtube_client.playlistItems().list(part='snippet', playlistId=playlist, maxResults=5).execute()
-    novos, idr = [], None
-    for item in videos['items']:
-        vid = item['snippet']['resourceId']['videoId']
-        if not idr: idr = vid
-        if vid != ultimo:
-            novos.append({"id": vid, "titulo": item['snippet']['title'], "link": f"https://www.youtube.com/watch?v={vid}"})
-        else: break
-    return novos[::-1], idr
 
+    # Pega os vídeos mais recentes (máx. 5)
+    videos = youtube_client.playlistItems().list(part='snippet', playlistId=playlist, maxResults=5).execute()
+
+    novos, idr = [], None  # lista de novos vídeos e o último ID novo encontrado
+
+    for item in videos['items']:
+        vid = item['snippet']['resourceId']['videoId']  # pega o ID do vídeo
+        if not idr:
+            idr = vid  # guarda o ID do mais recente
+        if vid != ultimo:
+            # se o vídeo ainda não foi processado, adiciona à lista
+            novos.append({
+                "id": vid,
+                "titulo": item['snippet']['title'],
+                "link": f"https://www.youtube.com/watch?v={vid}"
+            })
+        else:
+            break  # se encontrou o último vídeo processado, para de verificar
+    return novos[::-1], idr  # retorna em ordem do mais antigo para o mais novo
+
+
+# 🧾 Função que gera o resumo do vídeo
 def gerar_resumo(video):
     titulo, vid, link = video['titulo'], video['id'], video['link']
     print(f"🎧 Baixando áudio de: {titulo}")
-    audio_path = f"audios/{vid}.mp3"
+
+    audio_path = f"audios/{vid}.mp3"  # caminho onde o áudio será salvo
+
     try:
+        # Baixa apenas o áudio do vídeo
         yt = YouTube(link)
         yt.streams.filter(only_audio=True).first().download(filename=audio_path)
+
+        # Transcreve o áudio em texto com o Whisper
         texto = model_whisper.transcribe(audio_path)["text"]
+
     except Exception as e:
+        # Caso aconteça algum erro, cria um texto alternativo
         print(f"⚠️ Erro ao baixar/transcrever: {e}")
         texto = f"Sem áudio disponível, use o título '{titulo}' para resumir."
-    prompt = f"Resuma em 4 frases jornalísticas curtas: {texto[:7000]}"
-    resumo = GEMINI_TEXT_MODEL.generate_content(prompt).text.strip()
-    print("✅ Resumo gerado!\n")
-    return resumo
 
+    # Gera o prompt para o modelo Gemini (pedindo um resumo curto)
+    prompt = f"Resuma em 4 frases jornalísticas curtas: {texto[:7000]}"
+
+    # Usa o modelo Gemini para criar o resumo
+    resumo = GEMINI_TEXT_MODEL.generate_content(prompt).text.strip()
+
+    print("✅ Resumo gerado!\n")
+    return resumo  # retorna o resumo gerado
+
+
+# 💬 Função que envia mensagem pelo WhatsApp usando Twilio
 def enviar_whatsapp(msg):
-    contatos = ['whatsapp:+0000000000', 'whatsapp:+0000000000']
-    de_onde = 'whatsapp:+0000000' # Seu numero Twilio
+    # lista de contatos que vão receber a mensagem
+    contatos = ['whatsapp:+000000', 'whatsapp:+0000000']
+
+    # número do Twilio (fixo)
+    de_onde = 'whatsapp:+000000'
+
+    # envia a mensagem para cada contato da lista
     for c in contatos:
         try:
             twilio_client.messages.create(from_=de_onde, to=c, body=msg)
@@ -61,13 +109,27 @@ def enviar_whatsapp(msg):
         except Exception as e:
             print(f"❌ Falha {c}: {e}")
 
+
+# 🚀 Função principal que orquestra tudo
 def main():
+    # busca vídeos novos
     vids, ultimo = buscar_videos_novos()
+
+    # percorre até 2 vídeos novos
     for v in vids[:2]:
+        # gera resumo
         resumo = gerar_resumo(v)
+
+        # monta a mensagem final com o título, resumo e link
         msg = f"📹 *Novo vídeo!*\n\n{v['titulo']}\n\n{resumo}\n\n{v['link']}"
+
+        # envia a mensagem via WhatsApp
         enviar_whatsapp(msg)
+
+    # atualiza o arquivo com o último vídeo processado
     open(ULTIMO_ID_FILE, "w").write(ultimo)
 
+
+# 🏁 Executa o script se for rodado diretamente
 if __name__ == "__main__":
     main()
