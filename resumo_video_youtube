@@ -1,0 +1,73 @@
+import os
+from pytube import YouTube
+import whisper
+from googleapiclient.discovery import build
+import google.generativeai as genai
+from twilio.rest import Client
+
+YOUTUBE_API_KEY = "SUA_CHAVE_YOUTUBE"
+GOOGLE_API_KEY = "SUA_CHAVE_GEMINI"
+TWILIO_ACCOUNT_SID = "SEU_SID_TWILIO"
+TWILIO_AUTH_TOKEN = "SEU_TOKEN_TWILIO"
+CHANNEL_ID = "UCT6Imb3GXhF8GmjpIk6y2lg"
+
+genai.configure(api_key=GOOGLE_API_KEY)
+youtube_client = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+GEMINI_TEXT_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite-preview-09-2025')
+model_whisper = whisper.load_model("small")
+
+os.makedirs("audios", exist_ok=True)
+os.makedirs("dados", exist_ok=True)
+ULTIMO_ID_FILE = 'dados/ultimo_video_id.txt'
+
+def buscar_videos_novos():
+    ultimo = open(ULTIMO_ID_FILE).read().strip() if os.path.exists(ULTIMO_ID_FILE) else None
+    uploads = youtube_client.channels().list(part='contentDetails', id=CHANNEL_ID).execute()
+    playlist = uploads['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+    videos = youtube_client.playlistItems().list(part='snippet', playlistId=playlist, maxResults=5).execute()
+    novos, idr = [], None
+    for item in videos['items']:
+        vid = item['snippet']['resourceId']['videoId']
+        if not idr: idr = vid
+        if vid != ultimo:
+            novos.append({"id": vid, "titulo": item['snippet']['title'], "link": f"https://www.youtube.com/watch?v={vid}"})
+        else: break
+    return novos[::-1], idr
+
+def gerar_resumo(video):
+    titulo, vid, link = video['titulo'], video['id'], video['link']
+    print(f"🎧 Baixando áudio de: {titulo}")
+    audio_path = f"audios/{vid}.mp3"
+    try:
+        yt = YouTube(link)
+        yt.streams.filter(only_audio=True).first().download(filename=audio_path)
+        texto = model_whisper.transcribe(audio_path)["text"]
+    except Exception as e:
+        print(f"⚠️ Erro ao baixar/transcrever: {e}")
+        texto = f"Sem áudio disponível, use o título '{titulo}' para resumir."
+    prompt = f"Resuma em 4 frases jornalísticas curtas: {texto[:7000]}"
+    resumo = GEMINI_TEXT_MODEL.generate_content(prompt).text.strip()
+    print("✅ Resumo gerado!\n")
+    return resumo
+
+def enviar_whatsapp(msg):
+    contatos = ['whatsapp:+0000000000', 'whatsapp:+0000000000']
+    de_onde = 'whatsapp:+0000000' # Seu numero Twilio
+    for c in contatos:
+        try:
+            twilio_client.messages.create(from_=de_onde, to=c, body=msg)
+            print(f"✅ Enviado para {c}")
+        except Exception as e:
+            print(f"❌ Falha {c}: {e}")
+
+def main():
+    vids, ultimo = buscar_videos_novos()
+    for v in vids[:2]:
+        resumo = gerar_resumo(v)
+        msg = f"📹 *Novo vídeo!*\n\n{v['titulo']}\n\n{resumo}\n\n{v['link']}"
+        enviar_whatsapp(msg)
+    open(ULTIMO_ID_FILE, "w").write(ultimo)
+
+if __name__ == "__main__":
+    main()
